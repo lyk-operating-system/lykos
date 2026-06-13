@@ -1,0 +1,19 @@
+[package]
+name = "lykos-kernel"
+version = "0.1.0"
+authors = ["Matei Lupu"]
+edition = "2024"
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+bitflags = "2.12.1"
+intrusive-collections = { version = "0.10.1", default-features = false }
+limine = "0.5"
+
+[profile.release]
+panic = "abort"

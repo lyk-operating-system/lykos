@@ -1,0 +1,9 @@
+# Editors
+/.vscode
+/.zed
+
+# Chariot
+.chariot-cache
+
+# QEMU
+qemu

@@ -1,0 +1,72 @@
+@option "arch" = [ "x86_64" "aarch64" ]
+@option "profile" = [ "dev" "release" ]
+
+// Sources
+
+source/kernel {
+    url: "kernel"
+    type: "local"
+}
+
+source/limine {
+    url: "https://codeberg.org/Limine/Limine.git"
+    type: "git"
+    revision: "v10.x-binary"
+}
+
+source/support {
+    url: "support"
+    type: "local"
+}
+
+//
+
+custom/kernel {
+    dependencies: [
+        image/clang image/rustup
+        source/kernel source/support
+    ]
+    options: [ "arch" "profile" ]
+    configure: <sh>
+        rustup default stable
+    </sh>
+    build: <sh>
+        make -C $SOURCES_DIR/kernel \
+            RUST_PROFILE=$OPTION_profile \
+            BUILD_DIR=$BUILD_DIR
+    </sh>
+    install: <sh>
+    make -C $SOURCES_DIR/kernel \
+        install \
+        RUST_PROFILE=$OPTION_profile \
+        BUILD_DIR=$BUILD_DIR \
+        DESTDIR=$INSTALL_DIR
+    </sh>
+}
+
+custom/image {
+    dependencies: [
+        custom/kernel
+        image/xorriso
+        source/limine source/support
+    ]
+    options: [ "arch" "profile" ]
+    always_clean: "true"
+    build: <sh>
+        mkdir -p iso_root/EFI/BOOT
+        cp $CUSTOM_DIR/kernel/kernel iso_root/kernel
+
+        cp $SOURCES_DIR/support/limine.conf ./iso_root
+        cp $SOURCES_DIR/limine/limine-uefi-cd.bin ./iso_root
+        cp $SOURCES_DIR/limine/BOOTX64.EFI ./iso_root/EFI/BOOT
+
+    	xorriso -as mkisofs \
+    		-no-emul-boot -boot-load-size 4 -boot-info-table \
+    		--efi-boot limine-uefi-cd.bin \
+    		-efi-boot-part --efi-boot-image --protective-msdos-label \
+    		iso_root -o lykos.iso
+    </sh>
+    install: <sh>
+        install lykos.iso $INSTALL_DIR
+    </sh>
+}
