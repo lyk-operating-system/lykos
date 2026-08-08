@@ -8,6 +8,11 @@ source/kernel {
     type: "local"
 }
 
+source/utils {
+    url: "utils"
+    type: "local"
+}
+
 source/limine {
     url: "https://codeberg.org/Limine/Limine.git"
     type: "git"
@@ -24,7 +29,7 @@ source/support {
 custom/kernel {
     dependencies: [
         image/clang image/rustup
-        source/kernel source/support
+        source/kernel source/support source/utils
     ]
     options: [ "arch" "profile" ]
     configure: <sh>
