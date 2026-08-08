@@ -1,65 +1,46 @@
-use core::ptr::null_mut;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::mem::offset_of;
+use core::ptr::{NonNull, null_mut};
+use core::sync::atomic::AtomicU16;
 
-use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use limine::memory_map::EntryType;
+use utils::collections::list::{List, ListNode};
 
 use crate::boot::MEMORYMAP_REQUEST;
+use crate::memory::page::{MAX_PAGE_ORDER, Page, PageState};
 use crate::memory::{PAGE_SIZE, PhysAddr, hhdm_offset};
 use crate::println;
 use crate::sync::spinlock::SpinLock;
 
-pub const MAX_BLOCK_ORDER: usize = 10;
-
-pub struct Block {
-    pub addr: PhysAddr,
-
-    pub mapcount: AtomicU16,
-    pub children: AtomicU16,
-
-    order: usize,
-    free: bool,
-    link: LinkedListAtomicLink,
+struct PageDb {
+    pages: *mut Page,
+    page_count: usize,
 }
 
-impl Block {
-    pub fn inc_children(&self) {
-        self.children.fetch_add(1, Ordering::Relaxed);
-    }
+unsafe impl Sync for PageDb {}
 
-    pub fn dec_children(&self) -> bool {
-        let old = self.children.fetch_sub(1, Ordering::Relaxed);
+static mut PAGE_DATABASE: PageDb = PageDb {
+    pages: core::ptr::null_mut(),
+    page_count: 0,
+};
 
-        old == 1
-    }
+const PAGE_LIST_NODE_OFF: usize = offset_of!(Page, state.Free.list_node);
 
-    pub fn set_children(&self, count: u16) {
-        self.children.store(count, Ordering::Relaxed);
-    }
-}
-
-intrusive_adapter!(BlockAdapter = &'static Block: Block { link => LinkedListAtomicLink });
-
-pub struct BuddyAllocator {
-    blocks: &'static mut [Block],
-    block_count: usize,
-    levels: [LinkedList<BlockAdapter>; MAX_BLOCK_ORDER + 1],
+struct BuddyAllocator {
+    levels: [List<Page, PAGE_LIST_NODE_OFF>; MAX_PAGE_ORDER + 1],
 }
 
 impl BuddyAllocator {
-    pub fn new(blocks: &'static mut [Block]) -> Self {
-        let block_count = blocks.len();
-        let levels = core::array::from_fn(|_| LinkedList::new(BlockAdapter::new()));
-
+    pub const fn new() -> Self {
+        const INIT: List<Page, PAGE_LIST_NODE_OFF> = List::new();
         Self {
-            blocks,
-            block_count,
-            levels,
+            levels: [INIT; MAX_PAGE_ORDER + 1],
         }
     }
 }
 
-static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
+static BUDDY_ALLOCATOR: SpinLock<BuddyAllocator> = SpinLock::new(BuddyAllocator::new());
+
+unsafe impl Send for BuddyAllocator {}
 
 pub fn init() {
     let memory_map_response = MEMORYMAP_REQUEST
@@ -72,9 +53,16 @@ pub fn init() {
 
     print_memory_map();
 
+    /*
+     * Find the last physical memory address we need to track.
+     * This means skipping BAD_MEMORY and RESERVED.
+     */
     let mut max_phys = 0;
     for entry in memory_map_response.entries() {
-        if entry.entry_type != EntryType::USABLE {
+        if matches!(
+            entry.entry_type,
+            EntryType::BAD_MEMORY | EntryType::RESERVED
+        ) {
             continue;
         }
 
@@ -87,15 +75,16 @@ pub fn init() {
         max_phys != 0,
         "Bootloader memory map contains no usable memory regions"
     );
+    max_phys = (max_phys + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 
-    let total_pages = (max_phys as usize) / PAGE_SIZE;
+    let page_count = (max_phys as usize) / PAGE_SIZE;
 
     // Number of bytes reserverd for the page database.
-    let page_db_bytes = total_pages * size_of::<Block>();
+    let page_db_bytes = page_count * size_of::<Page>();
     let page_db_bytes_aligned = (page_db_bytes + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
-    let mut blocks_base_phys = 0;
-    let mut blocks_ptr: *mut Block = null_mut();
+    let mut pages_base_phys = 0;
+    let mut pages_ptr: *mut Page = null_mut();
     // Find a usable region, large enough to hold the page database.
     for entry in memory_map_response.entries() {
         if entry.entry_type != EntryType::USABLE {
@@ -103,34 +92,39 @@ pub fn init() {
         }
 
         if (entry.length as usize) >= page_db_bytes_aligned {
-            blocks_base_phys = entry.base as usize;
-            blocks_ptr = (blocks_base_phys + hhdm_offset()) as *mut Block;
+            pages_base_phys = entry.base as usize;
+            pages_ptr = (pages_base_phys + hhdm_offset()) as *mut Page;
             break;
         }
     }
     assert!(
-        !blocks_ptr.is_null(),
+        !pages_ptr.is_null(),
         "No usable memory regeion large enough for the page database"
     );
 
-    let blocks = unsafe { core::slice::from_raw_parts_mut(blocks_ptr, total_pages) };
+    // Set each page's address and mark them as used for now.
+    unsafe {
+        for i in 0..page_count {
+            pages_ptr.add(i).write(Page {
+                addr: PhysAddr(i * PAGE_SIZE),
+                order: 0,
+                state: PageState::Used {
+                    mapcount: AtomicU16::new(0),
+                    children: AtomicU16::new(0),
+                },
+            });
+        }
 
-    // Set each block's address and mark them as used for now.
-    for i in 0..total_pages {
-        blocks[i] = Block {
-            addr: PhysAddr(i * PAGE_SIZE),
-            order: 0,
-            free: false,
-            mapcount: AtomicU16::new(0),
-            children: AtomicU16::new(0),
-            link: LinkedListAtomicLink::new(),
+        PAGE_DATABASE = PageDb {
+            pages: pages_ptr,
+            page_count,
         }
     }
 
-    let mut allocator = BuddyAllocator::new(blocks);
+    let mut allocator = BuddyAllocator::new();
 
     /*
-     * Iterate through each entry and set the blocks corresponding to a usable memory entry as free
+     * Iterate through each entry and set the pages corresponding to a usable memory entry as free
      * using greedy.
      */
     for entry in memory_map_response.entries() {
@@ -140,11 +134,11 @@ pub fn init() {
 
         let mut addr = entry.base as usize;
         let end = (entry.base + entry.length) as usize;
-        if entry.base as usize == blocks_base_phys {
+        if entry.base as usize == pages_base_phys {
             addr += page_db_bytes_aligned;
         }
 
-        let mut order = MAX_BLOCK_ORDER;
+        let mut order = MAX_PAGE_ORDER;
 
         while addr < end {
             let span = PAGE_SIZE << order;
@@ -155,119 +149,136 @@ pub fn init() {
             }
 
             let idx = addr / PAGE_SIZE;
-            let block = &mut allocator.blocks[idx];
 
-            block.order = order;
-            block.free = true;
+            unsafe {
+                let page_ptr = PAGE_DATABASE.pages.add(idx);
+                let page = &mut *page_ptr;
 
-            let static_block = unsafe { &mut *(block as *mut Block) };
-            allocator.levels[order].push_back(static_block);
+                page.order = order;
+                page.state = PageState::Free {
+                    list_node: ListNode::default(),
+                };
+
+                allocator.levels[order].push_end(NonNull::new_unchecked(page_ptr));
+            }
 
             addr += span;
-            order = MAX_BLOCK_ORDER;
+            order = MAX_PAGE_ORDER;
         }
     }
 
-    *BUDDY_ALLOCATOR.lock() = Some(allocator);
+    *BUDDY_ALLOCATOR.lock() = allocator;
 
     println!("Buddy allocator initialized.");
 }
 
-pub fn alloc(order: usize) -> Option<&'static Block> {
-    debug_assert!(order <= MAX_BLOCK_ORDER);
+pub fn alloc(order: usize) -> Option<NonNull<Page>> {
+    debug_assert!(order <= MAX_PAGE_ORDER);
 
-    let mut guard = BUDDY_ALLOCATOR.lock();
-    let allocator = guard.as_mut()?;
+    let mut allocator = BUDDY_ALLOCATOR.lock();
 
     let mut i = order;
     while allocator.levels[i].is_empty() {
         i += 1;
-        if i > MAX_BLOCK_ORDER {
+        if i > MAX_PAGE_ORDER {
             return None;
         }
     }
 
-    let block = allocator.levels[i].pop_front()?;
-    let idx = block.addr.as_usize() / PAGE_SIZE;
-    // Split block if needed.
-    while i > order {
-        // When splitting we modify the metadata of the block on the right.
-        let r_idx = idx ^ (1 << (i - 1));
-        let r_block = &mut allocator.blocks[r_idx];
-        r_block.order = i - 1;
-        r_block.free = true;
+    let page = unsafe { allocator.levels[i].pop_front()?.as_mut() };
 
-        let static_r_block = unsafe { &mut *(r_block as *mut Block) };
-        allocator.levels[i - 1].push_back(static_r_block);
+    let idx = page.addr.as_usize() / PAGE_SIZE;
+    // Split page if needed.
+    while i > order {
+        // When splitting we modify the metadata of the page on the right.
+        let r_idx = idx ^ (1 << (i - 1));
+
+        unsafe {
+            let r_page_ptr = PAGE_DATABASE.pages.add(r_idx);
+            let r_page = &mut *r_page_ptr;
+            r_page.order = i - 1;
+            r_page.state = PageState::Free {
+                list_node: ListNode::default(),
+            };
+
+            allocator.levels[i - 1].push_end(NonNull::new_unchecked(r_page_ptr));
+        }
 
         i -= 1;
     }
 
-    let ret = &mut allocator.blocks[idx];
-    ret.order = order;
-    ret.free = false;
-    ret.mapcount.store(0, Ordering::Relaxed);
-    ret.children.store(0, Ordering::Relaxed);
+    unsafe {
+        let ret_ptr = PAGE_DATABASE.pages.add(idx);
+        let ret = &mut *ret_ptr;
+        ret.order = order;
+        ret.state = PageState::Used {
+            mapcount: AtomicU16::new(0),
+            children: AtomicU16::new(0),
+        };
 
-    Some(unsafe { &mut *(ret as *mut Block) })
+        Some(NonNull::new_unchecked(ret_ptr))
+    }
 }
 
-pub fn free(block: &'static Block) {
-    let mut guard = BUDDY_ALLOCATOR.lock();
-    let Some(allocator) = guard.as_mut() else {
-        return;
-    };
+pub fn free(page: NonNull<Page>) {
+    let mut allocator = BUDDY_ALLOCATOR.lock();
 
-    let mut idx = block.addr.as_usize() / PAGE_SIZE;
-    let mut i = block.order;
+    unsafe {
+        let mut idx = page.as_ref().addr.as_usize() / PAGE_SIZE;
+        let mut i = page.as_ref().order;
 
-    // Merge blocks if needed.
-    while i < MAX_BLOCK_ORDER {
-        let b_idx = idx ^ (1 << i);
-        if b_idx >= allocator.block_count {
-            break;
-        }
-
-        let buddy = &allocator.blocks[b_idx];
-        if buddy.free && buddy.order == i {
-            unsafe {
-                let mut cursor = allocator.levels[i].cursor_mut_from_ptr(buddy as *const Block);
-                cursor.remove();
+        // Merge pages if needed.
+        while i < MAX_PAGE_ORDER {
+            let b_idx = idx ^ (1 << i);
+            if b_idx >= PAGE_DATABASE.page_count {
+                break;
             }
 
-            // We always follow the block on the left.
-            if idx > b_idx {
-                idx = b_idx;
+            let buddy_ptr = PAGE_DATABASE.pages.add(b_idx);
+            let buddy = &mut *buddy_ptr;
+
+            if matches!(buddy.state, PageState::Free { .. }) && buddy.order == i {
+                allocator.levels[i].remove(NonNull::new_unchecked(buddy_ptr));
+
+                buddy.state = PageState::Used {
+                    mapcount: AtomicU16::new(0),
+                    children: AtomicU16::new(0),
+                };
+
+                // We always follow the page on the left.
+                if idx > b_idx {
+                    idx = b_idx;
+                }
+                i += 1;
+            } else {
+                break;
             }
-            i += 1;
-        } else {
-            break;
         }
+
+        let page_ptr = PAGE_DATABASE.pages.add(idx);
+        let page = &mut *page_ptr;
+        page.order = i;
+        page.state = PageState::Free {
+            list_node: ListNode::default(),
+        };
+
+        allocator.levels[i].push_end(NonNull::new_unchecked(page_ptr));
     }
-
-    let block = &mut allocator.blocks[idx];
-    block.order = i;
-    block.free = true;
-    block.mapcount.store(0, Ordering::Relaxed);
-    block.children.store(0, Ordering::Relaxed);
-
-    let static_block = unsafe { &mut *(block as *mut Block) };
-    allocator.levels[i].push_back(static_block);
 }
 
-pub fn get_block(addr: PhysAddr) -> Option<&'static Block> {
-    let idx = addr.as_usize() / PAGE_SIZE;
+pub fn get_page(addr: PhysAddr) -> Option<NonNull<Page>> {
+    unsafe {
+        debug_assert!(addr.is_aligned_to(PAGE_SIZE));
 
-    let guard = BUDDY_ALLOCATOR.lock();
-    let allocator = guard.as_ref()?;
+        let idx = addr.as_usize() / PAGE_SIZE;
+        debug_assert!(idx < PAGE_DATABASE.page_count);
 
-    if idx >= allocator.block_count {
-        return None;
+        let page_ptr = PAGE_DATABASE.pages.add(idx);
+        let page = &mut *page_ptr;
+        debug_assert!(matches!(page.state, PageState::Used { .. }));
+
+        Some(NonNull::new_unchecked(page_ptr))
     }
-
-    let block = &allocator.blocks[idx];
-
-    Some(unsafe { &*(block as *const Block) })
 }
 
 fn print_memory_map() {

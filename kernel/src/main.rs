@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(offset_of_enum)]
 
 mod arch;
 mod boot;

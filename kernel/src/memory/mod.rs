@@ -4,6 +4,7 @@ use crate::boot::HHDM_REQUEST;
 use core::ops::{Add, Sub};
 
 pub mod buddy;
+pub mod page;
 pub mod vm;
 
 pub const PAGE_SIZE: usize = 4096;

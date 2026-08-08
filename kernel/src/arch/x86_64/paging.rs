@@ -2,7 +2,9 @@ use bitflags::bitflags;
 use core::{arch::asm, ptr::null_mut};
 
 use crate::memory::{
-    GIB, KIB, MIB, PAGE_SIZE, PhysAddr, VirtAddr, VmCache, VmProtection, buddy, hhdm_offset,
+    GIB, KIB, MIB, PAGE_SIZE, PhysAddr, VirtAddr, VmCache, VmProtection,
+    buddy::{self, get_page},
+    hhdm_offset,
 };
 
 type Pte = u64;
@@ -80,7 +82,7 @@ static mut HIGHER_HALF_ENTRIES: [Pte; 256] = [0; 256];
 
 impl Map {
     pub fn new() -> Option<Self> {
-        let table = buddy::alloc(0)?;
+        let table = unsafe { buddy::alloc(0)?.as_ref() };
         let table_phys = table.addr.as_usize();
         let table_virt = table_phys + hhdm_offset();
 
@@ -156,11 +158,10 @@ impl Map {
                             continue;
                         }
 
-                        let block = buddy::get_block(PhysAddr(
-                            allocated_tables[j] as usize - hhdm_offset(),
-                        ))
-                        .expect("");
-                        buddy::free(block);
+                        buddy::free(
+                            buddy::get_page(PhysAddr(allocated_tables[j] as usize - hhdm_offset()))
+                                .unwrap(),
+                        );
                     }
 
                     return None;
@@ -182,8 +183,10 @@ impl Map {
             *entry_ptr = (paddr.as_usize() as u64) | leaf_flags.bits();
 
             if !is_present {
-                let block = buddy::get_block(PhysAddr(current_table as usize - hhdm_offset()))?;
-                block.inc_children();
+                let page = get_page(PhysAddr(current_table as usize - hhdm_offset()))
+                    .unwrap()
+                    .as_ref();
+                page.inc_children();
             }
         }
 
@@ -275,7 +278,7 @@ fn get_next_level(
         return None;
     }
 
-    let page = buddy::alloc(0)?;
+    let page = unsafe { buddy::alloc(0)?.as_ref() };
     let page_phys = page.addr.as_usize();
     let page_virt = page_phys + hhdm_offset();
 
@@ -284,7 +287,11 @@ fn get_next_level(
         *table.add(index) = (page_phys as u64) | flags.bits();
     }
 
-    let parent_block = buddy::get_block(PhysAddr(table as usize - hhdm_offset()))?;
+    let parent_block = unsafe {
+        buddy::get_page(PhysAddr(table as usize - hhdm_offset()))
+            .unwrap()
+            .as_ref()
+    };
     parent_block.inc_children();
 
     Some((page_virt as *mut Pte, true))
@@ -301,7 +308,7 @@ fn split_huge_pte(entry: Pte, level: usize) -> Option<Pte> {
         _ => panic!("Invalid huge PTE level!"),
     };
 
-    let page = buddy::alloc(0)?;
+    let page = unsafe { buddy::alloc(0)?.as_ref() };
     let page_phys = page.addr.as_usize();
     let page_virt = page_phys + hhdm_offset();
 
@@ -334,8 +341,11 @@ fn split_huge_pte(entry: Pte, level: usize) -> Option<Pte> {
 pub fn init() {
     for i in 0..256 {
         // Pre-allocate PML3 tables.
-        let table =
-            buddy::alloc(0).expect("Couldn't preallocate PML3 tables for higher half entries!");
+        let table = unsafe {
+            buddy::alloc(0)
+                .expect("Could not preallocate PML3 tables for higher half entries!")
+                .as_ref()
+        };
         let table_phys = table.addr.as_usize();
         let table_virt = table_phys + hhdm_offset();
 
