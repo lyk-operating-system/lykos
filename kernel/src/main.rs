@@ -7,8 +7,10 @@ mod boot;
 mod logger;
 mod memory;
 mod panic;
+mod percpu;
 mod print;
 mod sync;
+mod sys;
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kernel_main() -> ! {

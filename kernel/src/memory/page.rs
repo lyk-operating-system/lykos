@@ -20,7 +20,6 @@ pub(super) enum PageState {
         mapcount: AtomicU16,
         children: AtomicU16,
     },
-    // Slab(Slab),
 }
 
 impl Page {

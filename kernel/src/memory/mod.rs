@@ -5,6 +5,7 @@ use core::ops::{Add, Sub};
 
 pub mod buddy;
 pub mod page;
+pub mod slub;
 pub mod vm;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -12,6 +13,8 @@ pub const PAGE_SIZE: usize = 4096;
 pub const KIB: usize = 1024;
 pub const MIB: usize = KIB * 1024;
 pub const GIB: usize = MIB * 1024;
+
+pub const MAX_NUMA_NODES: usize = 32;
 
 #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PhysAddr(pub usize);
