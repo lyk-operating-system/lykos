@@ -9,7 +9,7 @@ use crate::boot::MEMORYMAP_REQUEST;
 use crate::memory::page::{MAX_PAGE_ORDER, Page, PageState};
 use crate::memory::{PAGE_SIZE, PhysAddr, hhdm_offset};
 use crate::println;
-use crate::sync::spinlock::SpinLock;
+use crate::sync::spinlock::Spinlock;
 
 struct PageDb {
     pages: *mut Page,
@@ -38,7 +38,7 @@ impl BuddyAllocator {
     }
 }
 
-static BUDDY_ALLOCATOR: SpinLock<BuddyAllocator> = SpinLock::new(BuddyAllocator::new());
+static BUDDY_ALLOCATOR: Spinlock<BuddyAllocator> = Spinlock::new(BuddyAllocator::new());
 
 unsafe impl Send for BuddyAllocator {}
 

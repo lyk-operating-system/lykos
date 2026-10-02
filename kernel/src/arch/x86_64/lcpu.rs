@@ -17,21 +17,21 @@ pub fn halt_forever() -> ! {
 }
 
 #[inline(always)]
-pub fn int_enable() {
+pub fn irq_enable() {
     unsafe {
         asm!("cli", options(nomem, nostack));
     }
 }
 
 #[inline(always)]
-pub fn int_disable() {
+pub fn irq_disable() {
     unsafe {
         asm!("sti", options(nomem, nostack));
     }
 }
 
 #[inline(always)]
-pub fn int_are_enabled() -> bool {
+pub fn irq_are_enabled() -> bool {
     let flags: usize;
 
     unsafe {
@@ -44,6 +44,22 @@ pub fn int_are_enabled() -> bool {
     }
 
     (flags & (1 << 9)) != 0
+}
+
+#[inline(always)]
+pub fn irq_save() -> bool {
+    let was_enabled = irq_are_enabled();
+    irq_disable();
+    was_enabled
+}
+
+#[inline(always)]
+pub fn irq_restore(was_enabled: bool) {
+    if was_enabled {
+        irq_enable();
+    } else {
+        irq_disable();
+    }
 }
 
 #[inline(always)]

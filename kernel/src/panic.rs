@@ -2,7 +2,7 @@ use crate::{arch::lcpu, println};
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    lcpu::int_disable();
+    lcpu::irq_disable();
 
     println!();
     println!("*** KERNEL PANIC ***");

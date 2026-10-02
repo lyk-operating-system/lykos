@@ -5,15 +5,20 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub struct SpinLock<T> {
+use crate::arch::lcpu;
+
+pub struct Spinlock<T, const DISABLE_INT: bool = true> {
     locked: AtomicBool,
     value: UnsafeCell<T>,
 }
 
-unsafe impl<T: Send> Sync for SpinLock<T> {}
-unsafe impl<T: Send> Send for SpinLock<T> {}
+pub type RawSpinlock<T> = Spinlock<T, false>;
+pub type RawSpinlockGuard<'a, T> = SpinlockGuard<'a, T, false>;
 
-impl<T> SpinLock<T> {
+unsafe impl<T: Send, const DISABLE_INT: bool> Sync for Spinlock<T, DISABLE_INT> {}
+unsafe impl<T: Send, const DISABLE_INT: bool> Send for Spinlock<T, DISABLE_INT> {}
+
+impl<T, const DISABLE_INT: bool> Spinlock<T, DISABLE_INT> {
     pub const fn new(value: T) -> Self {
         Self {
             locked: AtomicBool::new(false),
@@ -21,7 +26,9 @@ impl<T> SpinLock<T> {
         }
     }
 
-    pub fn lock(&self) -> SpinLockGuard<'_, T> {
+    pub fn lock(&self) -> SpinlockGuard<'_, T, DISABLE_INT> {
+        let prev_int_state = if DISABLE_INT { lcpu::irq_save() } else { false };
+
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -32,19 +39,26 @@ impl<T> SpinLock<T> {
             }
         }
 
-        SpinLockGuard { lock: self }
+        SpinlockGuard {
+            lock: self,
+            prev_int_state,
+        }
     }
 
-    pub fn unlock(&self) {
+    #[inline(always)]
+    fn unlock(&self) {
         self.locked.store(false, Ordering::Release);
     }
 }
 
-pub struct SpinLockGuard<'a, T> {
-    lock: &'a SpinLock<T>,
+pub struct SpinlockGuard<'a, T, const DISABLE_INT: bool = true> {
+    lock: &'a Spinlock<T, DISABLE_INT>,
+    prev_int_state: bool,
 }
 
-impl<T> Deref for SpinLockGuard<'_, T> {
+impl<T: ?Sized, const DISABLE_INT: bool> !Send for SpinlockGuard<'_, T, DISABLE_INT> {}
+
+impl<T, const DISABLE_INT: bool> Deref for SpinlockGuard<'_, T, DISABLE_INT> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -52,14 +66,18 @@ impl<T> Deref for SpinLockGuard<'_, T> {
     }
 }
 
-impl<T> DerefMut for SpinLockGuard<'_, T> {
+impl<T, const DISABLE_INT: bool> DerefMut for SpinlockGuard<'_, T, DISABLE_INT> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.lock.value.get() }
     }
 }
 
-impl<T> Drop for SpinLockGuard<'_, T> {
+impl<T, const DISABLE_INT: bool> Drop for SpinlockGuard<'_, T, DISABLE_INT> {
     fn drop(&mut self) {
         self.lock.unlock();
+
+        if DISABLE_INT {
+            lcpu::irq_restore(self.prev_int_state);
+        }
     }
 }

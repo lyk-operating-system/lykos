@@ -1,6 +1,6 @@
 use core::fmt::{self, Write};
 
-use crate::{arch::serial, sync::spinlock::SpinLock};
+use crate::{arch::serial, sync::spinlock::Spinlock};
 
 const BUFFER_SIZE: usize = 16 * 1024;
 
@@ -9,7 +9,7 @@ pub struct LoggerBuffer {
     position: usize,
 }
 
-pub static LOGGER_BUFFER: SpinLock<LoggerBuffer> = SpinLock::new(LoggerBuffer {
+pub static LOGGER_BUFFER: Spinlock<LoggerBuffer> = Spinlock::new(LoggerBuffer {
     buffer: [0; BUFFER_SIZE],
     position: 0,
 });
